@@ -163,7 +163,7 @@ def check_columns(block, text, size, tabs, indent_cm, first_cm, text_width=16.6)
         pos = end
 
 
-def add_paragraph(doc, block, defaults):
+def add_paragraph(doc, block, defaults, text_width=16.6):
     text = block.get("text", "")
     size = float(block.get("size_pt", defaults["size_pt"]))
     line = float(block.get("line_pt", defaults["line_pt"]))
@@ -181,13 +181,13 @@ def add_paragraph(doc, block, defaults):
     fmt.first_line_indent = Cm(first)
 
     rule = block.get("line_rule", "exact")
-    # 着重号 hang below the glyph box: give those lines room or Word clips the dots
-    if "{d}" in text:
-        if rule == "exact" and line < 24:
-            line = 24
-            rule = "at_least"
-        elif rule == "at_least":
-            line = max(line, 24)
+    # 着重号 hang below the glyph box: give those lines at least 24pt of leading
+    # or Word clips the dots. Above 24pt an "exact" rule already leaves enough
+    # room below the baseline, so the caller's rule is kept (and honoured).
+    dot_min = float(defaults.get("dot_min_line_pt", 24))
+    if "{d}" in text and line < dot_min:
+        line = dot_min
+        rule = "at_least"
     fmt.line_spacing = Pt(line)
     if rule == "at_least":
         fmt.line_spacing_rule = WD_LINE_SPACING.AT_LEAST
@@ -205,9 +205,11 @@ def add_paragraph(doc, block, defaults):
         shade(p, block["fill"].lstrip("#"))
 
     emit(p, text, size=size, bold=bold, color=color,
-         east_asia=defaults["font"], latin=defaults["latin"])
+         east_asia=block.get("font", defaults["font"]),
+         latin=block.get("latin", defaults["latin"]))
 
-    check_columns(block, text, size, [float(t) for t in tabs], indent, first)
+    check_columns(block, text, size, [float(t) for t in tabs], indent, first,
+                  text_width=text_width)
     return p
 
 
@@ -225,7 +227,8 @@ def add_title(doc, block, defaults):
         style_run(r, size=float(seg.get("size_pt", size)),
                   bold=bool(seg.get("bold", True)),
                   color=seg.get("color"),
-                  east_asia=defaults["font"], latin=defaults["latin"])
+                  east_asia=seg.get("font", block.get("font", defaults["font"])),
+                  latin=seg.get("latin", block.get("latin", defaults["latin"])))
     return p
 
 
@@ -296,6 +299,53 @@ def add_image(doc, block, defaults):
     return para
 
 
+def add_field(paragraph, code: str, *, size: float, east_asia: str, latin: str) -> None:
+    """Insert a Word field (PAGE / NUMPAGES) as a run."""
+    run = paragraph.add_run()
+    style_run(run, size=size, east_asia=east_asia, latin=latin)
+    begin = OxmlElement("w:fldChar")
+    begin.set(qn("w:fldCharType"), "begin")
+    instr = OxmlElement("w:instrText")
+    instr.set(qn("xml:space"), "preserve")
+    instr.text = f" {code} "
+    sep = OxmlElement("w:fldChar")
+    sep.set(qn("w:fldCharType"), "separate")
+    txt = OxmlElement("w:t")
+    txt.text = "1"
+    end = OxmlElement("w:fldChar")
+    end.set(qn("w:fldCharType"), "end")
+    for node in (begin, instr, sep, txt, end):
+        run._r.append(node)
+
+
+def add_footer(section, footer, defaults) -> None:
+    """footer: {text: '第 {page} 页 共 {pages} 页', size_pt, align, color}"""
+    text = footer.get("text")
+    if not text:
+        return
+    size = float(footer.get("size_pt", 9))
+    color = footer.get("color")
+    p = section.footer.paragraphs[0]
+    p.alignment = ALIGN[footer.get("align", "center")]
+    pos = 0
+    for marker, code in (("{page}", "PAGE"), ("{pages}", "NUMPAGES")):
+        idx = text.find(marker, pos)
+        if idx < 0:
+            continue
+        chunk = text[pos:idx]
+        if chunk:
+            r = p.add_run(chunk)
+            style_run(r, size=size, color=color,
+                      east_asia=defaults["font"], latin=defaults["latin"])
+        add_field(p, code, size=size, east_asia=defaults["font"], latin=defaults["latin"])
+        pos = idx + len(marker)
+    rest = text[pos:]
+    if rest:
+        r = p.add_run(rest)
+        style_run(r, size=size, color=color,
+                  east_asia=defaults["font"], latin=defaults["latin"])
+
+
 def add_pagebreak_carrier(doc) -> None:
     """A 1pt paragraph that carries only a page break (used after tables)."""
     p = doc.add_paragraph()
@@ -343,6 +393,13 @@ def build(spec: dict) -> dict:
     section.header_distance = Cm(float(margin.get("header", 1.5)))
     section.footer_distance = Cm(float(margin.get("footer", 1.5)))
 
+    text_width = (float(page.get("width_cm", 21.0))
+                  - float(margin.get("left", 2.2))
+                  - float(margin.get("right", 2.2)))
+
+    if spec.get("footer"):
+        add_footer(section, spec["footer"], defaults)
+
     counts = {"paragraphs": 0, "tables": 0, "images": 0, "pagebreaks": 0}
     last_para = None
 
@@ -376,7 +433,7 @@ def build(spec: dict) -> dict:
             last_para = add_image(doc, block, defaults)
             counts["images"] += 1
         else:
-            last_para = add_paragraph(doc, block, defaults)
+            last_para = add_paragraph(doc, block, defaults, text_width=text_width)
             counts["paragraphs"] += 1
 
     out = spec.get("out") or "out.docx"
