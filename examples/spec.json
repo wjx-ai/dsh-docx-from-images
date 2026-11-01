@@ -1,0 +1,36 @@
+{
+  "out": "example.docx",
+  "page": { "width_cm": 21, "height_cm": 29.7, "margin_cm": { "top": 2.2, "bottom": 2.2, "left": 2.2, "right": 2.2 } },
+  "body": { "font": "宋体", "latin": "Times New Roman", "size_pt": 12, "line_pt": 20 },
+  "blocks": [
+    { "type": "title", "size_pt": 26, "line_pt": 34, "after_pt": 6, "runs": [
+        { "text": "26 秋四年级上册语文 ", "color": "000000" },
+        { "text": "1-4 单元", "color": "0000E6" },
+        { "text": "期中复习", "color": "FA0000" } ] },
+    { "type": "text", "text": "专题三：选择题综合专项　　50道", "size_pt": 15, "bold": true,
+      "align": "center", "fill": "FFE591", "line_pt": 24, "before_pt": 3, "after_pt": 9 },
+
+    { "type": "text", "text": "1.\t下列加点字读音全部正确的一项是{b}（　）{/b}", "tabs_cm": [0.78], "before_pt": 7 },
+    { "type": "text", "text": "A.\t屹{d}立{/d}（yì）\t霎{d}时{/d}（shà）\t鹅{d}卵{/d}（luǎn）石\t崩{d}裂{/d}（bēng）",
+      "tabs_cm": [6.05, 9.4, 12.55], "indent_cm": 1.1 },
+    { "type": "text", "text": "B.\t风{d}俗{/d}（sú）\t稻{d}穗{/d}（huì）\t归{d}巢{/d}（cháo）\t霸{d}占{/d}（bà）",
+      "tabs_cm": [6.05, 9.4, 12.55], "indent_cm": 1.1 },
+
+    { "type": "text", "text": "2.\t下列数据来自课文《蟋蟀的住宅》的观察记录：", "tabs_cm": [0.78], "before_pt": 10 },
+    { "type": "table",
+      "rows": [
+        ["观察项目", "第一次", "第二次", "结论"],
+        ["住宅长度", "约 2 厘米", "约 4 厘米", "不断加深加宽"],
+        ["洞口气温", "较凉", "较凉", "阴凉干燥"],
+        ["出洞时间", "傍晚", "傍晚", "夜行性" ]
+      ],
+      "widths_cm": [4.2, 4.2, 4.2, 4.6], "header": true, "cell_align": "center" },
+
+    { "type": "text", "text": "3.\t下图为观察结果的柱状示意图：", "tabs_cm": [0.78], "before_pt": 10 },
+    { "type": "image", "src": "fig1.png", "width_cm": 9.5, "align": "center",
+      "caption": "图1 夜间鸣叫强度示意", "caption_size_pt": 10.5 },
+
+    { "type": "pagebreak" },
+    { "type": "text", "text": "第二页：分页符只生效一次，页边不会留下 ■ 黑方块。", "before_pt": 0 }
+  ]
+}
