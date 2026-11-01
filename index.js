@@ -106,8 +106,8 @@ export async function apply(ctx) {
         'Build a Word (.docx) document from a JSON layout spec using python-docx. ' +
         'Use this to re-typeset a transcribed page: blocks of text with {d}着重号{/d} and {b}bold{/b} markup, ' +
         'tab-stop columns (options A-D in 2 or 4 columns), shaded title banners, tables, cropped pictures, and explicit page breaks. ' +
-        'It applies the hard-won details automatically: 着重号 uses w:em val="underDot" (dots BELOW the glyph) and those lines get at-least 24pt ' +
-        'line spacing so the dots are not clipped; no "keep with next" is written (that would paint ■ squares in the Word margin) - use ' +
+        'It applies the hard-won details automatically: 着重号 uses w:em val="underDot" (dots BELOW the glyph) and those lines get at-least ' +
+        'dot_min_line_pt (default 24) line spacing so the dots are not clipped; no "keep with next" is written (that would paint ■ squares in the Word margin) - use ' +
         '{"type":"pagebreak"} instead; tab stops are measured from the page margin. ' +
         'Relative picture paths resolve against base_dir. Returns the written path plus layout warnings (e.g. a column about to overflow its tab stop).',
       parameters: {
@@ -116,13 +116,15 @@ export async function apply(ctx) {
           spec: {
             type: 'object',
             description:
-              'Layout spec. Shape: {out, page?{width_cm,height_cm,margin_cm{top,bottom,left,right}}, ' +
-              'body?{font,latin,size_pt,line_pt}, blocks:[...]}. ' +
-              'Blocks: {"type":"title",runs:[{text,color,bold,size_pt}],size_pt,line_pt,align,after_pt} | ' +
-              '{"type":"text",text,indent_cm,first_line_cm,tabs_cm:[..],size_pt,line_pt,line_rule:"exact"|"at_least",before_pt,after_pt,align,fill,color,bold} | ' +
+              'Layout spec. Shape: {out, page?{width_cm,height_cm,margin_cm{top,bottom,left,right,footer}}, ' +
+              'body?{font,latin,size_pt,line_pt,dot_min_line_pt}, ' +
+              'footer?{text,size_pt,align,color} (use {page}/{pages} for live PAGE/NUMPAGES fields), blocks:[...]}. ' +
+              'Blocks: {"type":"title",runs:[{text,color,bold,size_pt,font,latin}],size_pt,line_pt,align,after_pt} | ' +
+              '{"type":"text",text,indent_cm,first_line_cm,tabs_cm:[..],size_pt,line_pt,line_rule:"exact"|"at_least",before_pt,after_pt,align,fill,color,bold,font,latin} | ' +
               '{"type":"table",rows:[[cell,...]],widths_cm:[..],header,caption?} | ' +
               '{"type":"image",src,width_cm,align,caption,caption_size_pt} | ' +
               '{"type":"pagebreak"}. ' +
+              'Per-block font/latin overrides the body font, which is how a page mixes 宋体 stems with 楷体 quoted material. ' +
               'Text markup: {d}着重号{/d}, {b}bold{/b}, {i}italic{/i}, {u}underline{/u}; a tab (real "\\t" or a literal backslash-t) starts a new tab-stop column. ' +
               'A leading "A.\\t" option label is normalized to "A. " automatically so it does not jump into the first column.',
             additionalProperties: true,
@@ -311,7 +313,10 @@ const SKILL_BODY = `# 截图 → Word 重排（image-to-docx）
 | 坑 | 现象 | 正确做法 |
 |---|---|---|
 | **着重号画在字上** | \`w:em val="dot"\` 会把点画在字顶 | 必须 \`val="underDot"\`；也不要用“下划线”冒充 |
-| **着重号被裁一半** | 行距“固定值”时 Word 把字下方的点切掉 | 带着重号的行用**最小值 24pt**（\`line_rule:"at_least"\`），插件见 \`{d}\` 自动加高 |
+| **着重号被裁一半** | 行距“固定值”时 Word 把字下方的点切掉 | 带着重号的行 ≥ \`body.dot_min_line_pt\`（默认 24pt）并用 \`line_rule:"at_least"\`；字号小（≤13pt）时可把该值降到 21–22pt，既保点又不撑高版面 |
+| **整篇字号拍脑袋** | 用 15pt 排出来每题都多折一行，页数从 9 变 13 | 按截图反推：**行宽 cm ÷ 该行字数 = 单字宽**，再查 1pt=0.0353cm；同时用“分页是否与原图一致”当验收标准 |
+| **引文与题干同字体** | 材料/句子本是楷体，排成宋体后一眼假 | \`{"type":"text","font":"楷体","first_line_cm":1.06}\` —— 段落级 \`font\`/\`latin\` 覆盖 \`body\` |
+| **页脚页码写死** | 复制成“第 1 页 共 27 页”，合并后页数全错 | \`footer:{"text":"第 {page} 页 共 {pages} 页"}\`，插件写的是 PAGE/NUMPAGES 域 |
 | **左侧一排 ■** | 给段落设“与下段同页/段前分页/段中不分页”后 Word 在页边显示黑方块 | 一律不用 keep-with-next；要控制在第几页开始，就在**上一段末尾**插入分页符（\`{"type":"pagebreak"}\`） |
 | **选项整行跳到右边** | 行内标签 \`A.\\t\` 只替换了第一个制表符，剩下的跳到默认制表位 | 每个块显式给 \`tabs_cm\`；标签后的 \`\\t\` 与列 \`\\t\` 用同一套制表位（插件会估算列宽并告警“会溢出到默认制表位”） |
 | **制表位叠加缩进** | 以为 \`tabs_cm\` 从首行缩进算起 | 制表位从**页面左边距**算起，不要再加 \`indent_cm\` |
