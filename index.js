@@ -193,7 +193,12 @@ export async function apply(ctx) {
       description:
         'Crop a picture (figure, chart, diagram) out of a screenshot so it can be embedded with docx_typeset. ' +
         'Pass box=[x0,y0,x1,y1] in source pixels, or info=true to read the source size first, or grid=true to write a ' +
-        'labelled coordinate grid preview that makes picking the box easy. Supports white-margin trimming and upscaling for print.',
+        'labelled coordinate grid preview that makes picking the box easy. Supports white-margin trimming and upscaling for print. ' +
+        'For a PHOTOGRAPH of paper (not a clean screenshot) pass white_point=true so the grey sheet becomes pure white, ' +
+        'otherwise the figure lands in Word sitting in a grey box; trim_threshold sets what counts as ink. ' +
+        'For a question whose artwork is several panels (three rulers in a row, a picture beside its data) pass ' +
+        'compose=true plus panels=[{box},...] and the panels are stitched into ONE picture, which is what docx_typeset ' +
+        'needs because one image block holds one picture.',
       parameters: {
         type: 'object',
         properties: {
@@ -205,7 +210,54 @@ export async function apply(ctx) {
             description: 'Crop rectangle [x0,y0,x1,y1] in source pixels.',
           },
           pad: { type: 'number', description: 'Extra pixels of margin around the box (default 0).' },
-          trim: { type: 'boolean', description: 'Trim uniform white margins after cropping.' },
+          trim: { type: 'boolean', description: 'Trim the margin left around the ink.' },
+          trim_threshold: {
+            type: 'number',
+            description:
+              'Pixels darker than this count as ink when trimming (default 245 for screenshots, 205 once white_point is set). ' +
+              'Lower it to ignore faint pencil/stains; raise it to keep light-grey strokes.',
+          },
+          white_point: {
+            type: ['number', 'boolean'],
+            description:
+              'Paper level mapped to pure white, e.g. 195. Pass true to auto-detect it from the histogram. ' +
+              'Photographs of paper are grey (~200), so without this the crop keeps a grey background and the default 245 trim removes nothing.',
+          },
+          black_point: {
+            type: 'number',
+            description: 'Ink level mapped to black; only used together with a numeric white_point (auto mode picks it).',
+          },
+          grayscale: {
+            type: 'boolean',
+            description: 'Write an 8-bit grey PNG. Smaller and crisper for black-ink line art; implied by white_point.',
+          },
+          compose: {
+            type: 'boolean',
+            description: 'Stitch `panels` into a single picture instead of cropping one box.',
+          },
+          panels: {
+            type: 'array',
+            description:
+              'Panels for compose mode. Each: {box:[x0,y0,x1,y1], src?, pad?, trim?}. `src` defaults to the top-level src, ' +
+              'so several panels can come from one page.',
+            items: {
+              type: 'object',
+              properties: {
+                box: { type: 'array', items: { type: 'number' } },
+                src: { type: 'string' },
+                pad: { type: 'number' },
+                trim: { type: 'boolean' },
+              },
+              additionalProperties: true,
+            },
+          },
+          direction: { type: 'string', enum: ['horizontal', 'vertical'], description: 'Compose axis (default horizontal).' },
+          align: {
+            type: 'string',
+            enum: ['bottom', 'top', 'center', 'left', 'right'],
+            description: 'Cross-axis alignment of the panels. Bottom-align rows that share a baseline (e.g. rulers).',
+          },
+          gap: { type: 'number', description: 'Pixels between composed panels (default 32).' },
           scale: { type: 'number', description: 'Upscale factor for print quality (default 1).' },
           grid: { type: 'boolean', description: 'Draw a labelled grid instead of cropping.' },
           step: { type: 'number', description: 'Grid step in pixels (default 100).' },
@@ -220,7 +272,8 @@ export async function apply(ctx) {
         render: (_args, value) =>
           text(
             value.path
-              ? `Wrote ${value.path} (${value.crop_width || value.width}x${value.crop_height || value.height}px)`
+              ? `Wrote ${value.path} (${value.crop_width || value.width}x${value.crop_height || value.height}px)` +
+                (value.panels ? `, ${value.panels} panels stitched` : '')
               : JSON.stringify(value),
           ),
       },
@@ -229,6 +282,11 @@ export async function apply(ctx) {
         const base = baseFor(args)
         const spec = { ...args, src: abs(base, args.src) }
         delete spec.base_dir
+        if (Array.isArray(spec.panels)) {
+          spec.panels = spec.panels.map((panel) =>
+            panel && typeof panel.src === 'string' ? { ...panel, src: abs(base, panel.src) } : panel,
+          )
+        }
         if (!spec.out) spec.out = 'figure.png'
         spec.out = abs(base, spec.out)
         const tmp = join(tmpdir(), `docx-crop-${randomBytes(4).toString('hex')}.json`)
@@ -267,6 +325,10 @@ const SKILL_BODY = `# 截图 → Word 重排（image-to-docx）
 ## 流程
 
 1. **先探图**：\`docx_crop info=true\` 读出每张图的像素尺寸；需要裁剪插图时先 \`grid=true\` 生成带坐标网格的预览图，再定裁剪框。
+   定位插图有个不靠眼睛也稳的办法：先用 OCR（Windows 自带 \`Windows.Media.Ocr\`，zh-Hans-CN）拿到每行文字的 y 区间——**两行文字之间的“空带”就是插图**；再用墨迹掩膜（只取低饱和度的暗像素，红笔/蓝笔天然被排除）量出真实边界。
+   - **拍照件必须先美白**：手机拍的纸底是 ~200 的灰，而 \`trim\` 的阈值是 245，一个像素都裁不掉，图会带整块灰底贴进 Word。加 \`white_point:true\`（自动）或 \`white_point:195, black_point:60\`，再配 \`trim_threshold:205\`。
+   - **一题多联图**（一排三把尺子、左右两幅商品图）：\`image\` 块一个只能放一张，用 \`compose:true, panels:[{box},{box},{box}], align:"bottom"\` 拼成一张；共底线的图用 \`align:"bottom"\` 才不会错位。
+   - **躲开手写**：裁框下边界要停在印刷内容之后。学生常在图下方写解题过程，y1 多留几十像素就会连手写一起带进图里——先看墨迹逐行分布再定 y1。
 2. **逐图精读转写**：一张一张按块（题干 stem → 选项 rows → 说明/引文 → 插图/表格）转写。不要跳读、不要“合理猜测”用词。
    - **拼音按原样保留**。题目常考“读音有误”，故意印错（如 稻穗 huì、窗框 kuāng、囚犯似 sì、滋 zhī）；改成正确读音就把题做废了。只需保证声调符号本身正确。
    - **水印/遮挡**：按上下文补全，并在最终回复里逐条列出补全位置与内容，让用户复核。
@@ -323,6 +385,9 @@ const SKILL_BODY = `# 截图 → Word 重排（image-to-docx）
 | **LibreOffice 渲染崩溃** | 本机 LO Kit 报 0xC0000005 | 用 Word COM 导 PDF 再栅格化（见“验证”）；不要反复重试 LO |
 | **仅看 PDF 验收** | PDF 里看着没问题，Word 里点被裁、页边有 ■ | 关键项要在 Word 里看；PDF 只验证分页与对齐 |
 | **插图直接贴原截图** | 整页图糊、占满版心 | 先用 \`docx_crop\` 按图注区域裁出图（\`trim\` 去白边、\`scale\` 2x 提升印刷清晰度），再按版心比例设 \`width_cm\` |
+| **拍照件的图带灰底** | 图贴进 Word 是一块灰方块，和白纸对不上；\`trim\` 也裁不掉任何边 | 纸底 ~200 灰，245 阈值看不见它。加 \`white_point:true\`（或 \`white_point:195, black_point:60\`）+ \`trim_threshold:205\`；输出会自动转灰度，四角必须是 255 才算对 |
+| **一题多联图被截成一张** | 一排三把尺子只贴出一把，或选项图整体缺失 | \`compose:true, panels:[{box},…]\`，横向用 \`align:"bottom"\` 共底线，再按整体宽度设 \`width_cm\` |
+| **手写混进插图** | 图里出现学生的解题笔迹，且与印刷内容黏在一起分不开 | \`trim_threshold\` 抬高（如 115→205 之间取值）只按重墨收紧边界；更可靠的是看墨迹逐行分布，把 y1 停在印刷内容结束处再裁 |
 | **表格手写空格对齐** | 列不对齐、跨页表头丢失 | 用 \`{"type":"table"}\`：\`widths_cm\` 定列宽、\`header:true\` 自动重复表头、\`Table Grid\` 边框 |
 | **同一 subagent 复制粘贴长文** | 长 spec 被截断 | spec 写到文件，用 \`spec_path\` 传入 |
 

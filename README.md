@@ -12,7 +12,7 @@
 | 名称 | 类型 | 作用 |
 | --- | --- | --- |
 | `docx_typeset` | Tool | 按 JSON spec 生成 `.docx`：着重号、制表位列（2/4 栏选项）、色带标题、**表格**、**插图**、显式分页；生成前会估算列宽并返回 warning |
-| `docx_crop` | Tool | 从截图里裁插图：像素框裁剪、去白边、放大，或先输出带坐标的网格预览便于选框 |
+| `docx_crop` | Tool | 从截图/拍照件里裁插图：像素框裁剪、去白边、放大、网格预览；**纸底美白**（`white_point`）、**可调墨迹阈值**（`trim_threshold`）、**多联图拼合**（`compose` + `panels`） |
 | `image-to-docx` | Skill | 端到端流程：探图 → 逐图转写 → 标格式 → 写 spec → 生成 → 目视验收 → 交付话术 |
 
 ## 安装
@@ -81,7 +81,37 @@ docx_typeset({
 | 选项整行右移 | 行内标签 `A.\t` 只替换了第一个制表符 | 开头的 `A.\t` 自动归一成 `A. ` |
 | 制表位叠加缩进 | 以为 `tabs_cm` 从首行缩进算起 | 制表位从**页面左边距**量起，并估算列宽给出溢出 warning |
 | 插图糊 / 占满版心 | 直接塞整页截图 | 先用 `docx_crop` 裁图（去白边、2x 放大），再按版心比例给 `width_cm` |
+| 拍照件的图带灰底 | 图贴进 Word 是一块灰方块，`trim` 也裁不掉任何边 | 纸底 ~200 灰、245 阈值看不见它：加 `white_point:true` + `trim_threshold:205`（详见下节） |
+| 一题多联图被截成一张 | 一排三把尺子只贴出一把 | `compose:true` + `panels:[{box},…]`，横向用 `align:"bottom"` 共底线 |
+| 手写混进插图 | 图里出现学生笔迹，与印刷内容黏在一起 | 抬高 `trim_threshold` 只按重墨收紧边界；或看墨迹逐行分布，把 `y1` 停在印刷内容结束处 |
 | 表格手工空格对齐 | 列不齐、跨页表头丢失 | `Table Grid` + 显式列宽 + 表头跨页重复 |
+
+## 拍照件的插图（`white_point` / `compose`）
+
+截图是纯白底，拍照不是：手机拍的卷面**纸底约 200 灰**，于是默认 245 的 `trim` 阈值一个像素也裁不掉，图会带着整块灰底贴进 Word。三个参数解决：
+
+```json
+{
+  "src": "page3.jpg",
+  "out": "fig_wu.png",
+  "compose": true,
+  "panels": [
+    { "box": [100, 560, 562, 756] },
+    { "box": [640, 556, 1270, 758] }
+  ],
+  "white_point": true,
+  "trim": true,
+  "scale": 2,
+  "align": "bottom",
+  "gap": 48
+}
+```
+
+- `white_point`：纸底映射成纯白。`true` 按直方图自动取（85 分位数再降一点），或显式给数值配 `black_point`（如 `195` / `60`）。设了它就自动转 8-bit 灰度——黑墨线稿更清爽，体积更小。
+- `trim_threshold`：低于此值算墨迹。不设 `white_point` 时默认 245（老行为），设了则默认 205。想躲开淡淡的铅笔痕就把它调低。
+- `compose` + `panels`：一个 `image` 块只能放一张图，而一道题常常是“一排三把尺子”或“左右两幅商品图”，所以在这里拼成一张。`align:"bottom"` 让共底线的联图不错位（横向），`"top"/"center"/"left"/"right"` 同理；`direction:"vertical"` 可改成竖排。
+
+输出的 JSON 里带 `ink_box`（成品墨迹范围），四个角落应当是 255，可以用来判断美白是否真的生效。
 
 ## 验证（可选，需要装有 Word）
 
@@ -99,7 +129,7 @@ $d.ExportAsFixedFormat($pdf, 17); $d.Close(0); $w.Quit()
 ```
 index.js        插件入口：注册 docx_typeset / docx_crop / image-to-docx
 builder.py      JSON spec -> .docx（python-docx）
-crop.py         截取插图 / 网格预览 / 尺寸探测（Pillow）
+crop.py         截取插图 / 纸底美白 / 多联图拼合 / 网格预览 / 尺寸探测（Pillow）
 cordis.patch.yml  bundle 安装行
 locale/{zh,en}.json  插件面板的标题与描述
 icon.svg        插件图标
