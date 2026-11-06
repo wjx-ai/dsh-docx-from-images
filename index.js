@@ -1,10 +1,11 @@
 /**
  * Screenshot -> Word typesetting.
  *
- * Provides two mechanical tools and one skill:
+ * Provides three mechanical tools and one skill:
  *   docx_typeset - build a .docx from a small JSON layout spec (着重号 / tab columns /
  *                  tables / pictures / explicit page breaks), via python-docx
  *   docx_crop    - crop a figure out of a screenshot (with grid preview mode)
+ *   docx_ocr     - read an image as text lines WITH coordinates, and locate the figures
  *   image-to-docx skill - the end-to-end transcription workflow and its pitfalls
  */
 import { existsSync, readdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs'
@@ -15,6 +16,7 @@ import { randomBytes } from 'node:crypto'
 const HERE = dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'))
 const BUILDER = join(HERE, 'builder.py')
 const CROP = join(HERE, 'crop.py')
+const OCR = join(HERE, 'ocr.py')
 
 let cachedPython
 
@@ -305,6 +307,97 @@ export async function apply(ctx) {
   )
 
   ctx.effect(() =>
+    ctx.tools.register({
+      name: 'docx_ocr',
+      description:
+        'Read an image (screenshot, or a photo of a printed page) as text WITH coordinates, using the OCR engine built into ' +
+        'Windows. Use this whenever you cannot look at the picture yourself: it returns every text line plus its bounding box, ' +
+        'so you can transcribe faithfully and know where each line sits. ' +
+        'Set figures=true and it also reports the empty horizontal bands between text lines that still contain ink -- that is ' +
+        'where the illustrations are -- so you can crop them with docx_crop without ever seeing the page. ' +
+        'Chinese output is normalized (the raw engine puts a space between every glyph). ' +
+        'Everything is reported in the source image pixel space whatever scale was used. Windows only.',
+      parameters: {
+        type: 'object',
+        properties: {
+          src: { type: 'string', description: 'Image to read (absolute, or relative to base_dir).' },
+          lang: { type: 'string', description: 'OCR language tag (default zh-Hans-CN).' },
+          region: {
+            type: 'array',
+            items: { type: 'number' },
+            description: 'Only read [x0,y0,x1,y1]. Use it to skip a 密封线 column or the page header/footer.',
+          },
+          scale: { type: 'number', description: 'Upscale before OCR (default 1; 2 helps small print).' },
+          white_point: {
+            type: ['number', 'boolean'],
+            description: 'Whiten a photographed page before reading (see docx_crop); true = auto from the histogram.',
+          },
+          black_point: { type: 'number', description: 'Ink level for the level stretch; only with a numeric white_point.' },
+          figures: { type: 'boolean', description: 'Also report candidate illustration bands.' },
+          min_gap: { type: 'number', description: 'A gap wider than this may hold a figure (default 45px).' },
+          min_w: { type: 'number', description: 'Ignore figure candidates narrower than this (default 60px).' },
+          min_h: { type: 'number', description: 'Ignore figure candidates shorter than this (default 14px).' },
+          trim_threshold: {
+            type: 'number',
+            description: 'Pixels darker than this count as ink (default 245, or 205 once white_point is set).',
+          },
+          drop_rules: {
+            type: 'boolean',
+            description: 'Ignore ink columns that run down most of the page (rules, frames, 密封线) when boxing figures (default true).',
+          },
+          out: { type: 'string', description: 'Optional: also write the full JSON (with every box) here.' },
+          base_dir: { type: 'string', description: 'Directory for relative paths (defaults to the host cwd).' },
+        },
+        required: ['src'],
+        additionalProperties: false,
+      },
+      output: {
+        schema: {
+          type: 'object',
+          properties: {
+            lines: { type: 'number' },
+            text: { type: 'string' },
+            boxes: { type: 'array' },
+            figures: { type: 'array' },
+          },
+          additionalProperties: true,
+        },
+        render: (_args, value) => {
+          if (!value || value.ok === false) return text(JSON.stringify(value))
+          const lines = [`Read ${value.lines} text line(s) from ${value.src} (${value.width}x${value.height}px)`]
+          if (value.figures) {
+            lines.push(`Figure candidates (${value.figures.length}):`)
+            for (const f of value.figures) {
+              lines.push(`- box=[${f.x0},${f.y0},${f.x1},${f.y1}]  ${f.w}x${f.h}px`)
+            }
+          }
+          lines.push('', 'Text (each line: y | x | content):')
+          for (const b of value.boxes || []) lines.push(`${b.y0}\t${b.x0}\t${b.text}`)
+          return text(lines.join('\n'))
+        },
+      },
+      isConcurrencySafe: () => true,
+      async execute(args, exec) {
+        const base = baseFor(args)
+        const spec = { ...args, src: abs(base, args.src) }
+        delete spec.base_dir
+        if (spec.out) spec.out = abs(base, spec.out)
+        const tmp = join(tmpdir(), `docx-ocr-${randomBytes(4).toString('hex')}.json`)
+        writeFileSync(tmp, JSON.stringify(spec, null, 2), 'utf8')
+        try {
+          return await runPython(ctx, OCR, tmp, exec.signal)
+        } finally {
+          try {
+            unlinkSync(tmp)
+          } catch {
+            /* best effort */
+          }
+        }
+      },
+    }),
+  )
+
+  ctx.effect(() =>
     ctx.skills.register({
       name: 'image-to-docx',
       description:
@@ -320,16 +413,22 @@ export async function apply(ctx) {
 
 const SKILL_BODY = `# 截图 → Word 重排（image-to-docx）
 
-把截图里的版式忠实还原成 .docx。核心是两步：**逐字转写**（人眼/模型读图）+ **用本插件的工具落地排版**。
+把截图里的版式忠实还原成 .docx。核心是两步：**逐字转写** + **用本插件的工具落地排版**。
+
+转写这一步，看不见图的模型必须靠 \`docx_ocr\`（返回每行文字 + bbox）；能看见图的则直接读，用 \`docx_ocr\` 复核数字与易混字。
 
 ## 流程
 
-1. **先探图**：\`docx_crop info=true\` 读出每张图的像素尺寸；需要裁剪插图时先 \`grid=true\` 生成带坐标网格的预览图，再定裁剪框。
-   定位插图有个不靠眼睛也稳的办法：先用 OCR（Windows 自带 \`Windows.Media.Ocr\`，zh-Hans-CN）拿到每行文字的 y 区间——**两行文字之间的“空带”就是插图**；再用墨迹掩膜（只取低饱和度的暗像素，红笔/蓝笔天然被排除）量出真实边界。
+1. **先探图**：\`docx_ocr({src, scale:2, white_point:true, figures:true})\` 一次拿到三样东西——每行文字及坐标、整页文本、**插图候选带**。
+   - \`figures\` 里的框就是插图：插图一定落在文字行之间的空白带上，所以“两行之间仍有墨迹”的就是图；空白带本身无墨迹的不报（内部用墨迹掩膜复核），贯通上下的竖线（表格线、密封线）先用 \`drop_rules\` 剔掉。
+   - 需要更精确的边界时再用 \`docx_crop grid=true\` 出带坐标的网格预览，或 \`docx_crop info=true\` 读尺寸。
+   - 卷面左侧有密封线时，\`docx_ocr\` 传 \`region:[x,y,w,h]\` 把那一栏排掉，比事后裁干净。
    - **拍照件必须先美白**：手机拍的纸底是 ~200 的灰，而 \`trim\` 的阈值是 245，一个像素都裁不掉，图会带整块灰底贴进 Word。加 \`white_point:true\`（自动）或 \`white_point:195, black_point:60\`，再配 \`trim_threshold:205\`。
    - **一题多联图**（一排三把尺子、左右两幅商品图）：\`image\` 块一个只能放一张，用 \`compose:true, panels:[{box},{box},{box}], align:"bottom"\` 拼成一张；共底线的图用 \`align:"bottom"\` 才不会错位。
    - **躲开手写**：裁框下边界要停在印刷内容之后。学生常在图下方写解题过程，y1 多留几十像素就会连手写一起带进图里——先看墨迹逐行分布再定 y1。
 2. **逐图精读转写**：一张一张按块（题干 stem → 选项 rows → 说明/引文 → 插图/表格）转写。不要跳读、不要“合理猜测”用词。
+   - **OCR 会把每个汉字用空格隔开**（\`三 年 级\`），\`docx_ocr\` 已按“汉字—汉字 / 汉字—全角标点”合并，但 **ASCII 数字与运算符之间仍可能有空格**，落进 spec 前自己再看一眼。
+   - **数字是最容易读错的地方**：\`（46－28）÷3＝6\` 这类式子里的连字符、短横、减号，以及 \`6\`/\`8\`、\`1\`/\`7\` 在低分辨率下会混。**能拿到答案页就用答案反推题干**（先算一遍，对不上说明数字读错了），算不通宁可回头重读原图。
    - **拼音按原样保留**。题目常考“读音有误”，故意印错（如 稻穗 huì、窗框 kuāng、囚犯似 sì、滋 zhī）；改成正确读音就把题做废了。只需保证声调符号本身正确。
    - **水印/遮挡**：按上下文补全，并在最终回复里逐条列出补全位置与内容，让用户复核。
    - 全角括号、书名号、引号、破折号、省略号（……）按原文照录。
@@ -390,6 +489,10 @@ const SKILL_BODY = `# 截图 → Word 重排（image-to-docx）
 | **手写混进插图** | 图里出现学生的解题笔迹，且与印刷内容黏在一起分不开 | \`trim_threshold\` 抬高（如 115→205 之间取值）只按重墨收紧边界；更可靠的是看墨迹逐行分布，把 y1 停在印刷内容结束处再裁 |
 | **表格手写空格对齐** | 列不对齐、跨页表头丢失 | 用 \`{"type":"table"}\`：\`widths_cm\` 定列宽、\`header:true\` 自动重复表头、\`Table Grid\` 边框 |
 | **同一 subagent 复制粘贴长文** | 长 spec 被截断 | spec 写到文件，用 \`spec_path\` 传入 |
+| **OCR 把汉字逐字分开** | 转写出来是 \`三 年 级 上 册\`，写进 spec 到处是空格，行宽估算全错 | \`docx_ocr\` 已按“汉字—汉字/汉字—全角标点”合并；自己另写 OCR 时要做同样的归一 |
+| **低分辨率数字读错** | \`6\`/\`8\`、\`1\`/\`7\`、减号/连字符互混，算式算不通才发现 | \`scale:2\` 重读可疑区域；**有答案页就用答案反推校验**，算不通宁可回头重读原图 |
+| **插图框粘上密封线/表格线** | 裁出来左边多一条竖线，\`trim\` 也去不掉 | \`docx_ocr\` 的 \`drop_rules\` 先剔掉贯通上下的竖线；更干脆的是传 \`region\` 根本不读那一栏 |
+| **把“空带”当成图** | 章节之间的大片空白也被报成插图 | 空白带本身无墨迹的不算图（内部墨迹复核）；再用 \`min_w\`/\`min_h\` 滤掉页眉页脚的小标记 |
 
 ## 验证（Windows / Word 已安装）
 
@@ -408,5 +511,6 @@ $d.ExportAsFixedFormat($pdf, 17); $d.Close(0); $w.Quit()
 
 - 明确说明**只做了截图里出现的部分**（第几张图没有、哪些题只有题干），不要假装补全不存在的题。
 - 列出水印/遮挡处的补全清单。
+- 如果自己是靠 \`docx_ocr\` 读图（看不见图），要说清**哪些内容是 OCR 直读、哪些是按答案页反推的**，让用户优先核那几个地方。
 - \`present\` 交付 .docx；清理临时 PDF/PNG/中间 spec。
 `

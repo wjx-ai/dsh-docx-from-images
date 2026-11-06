@@ -1,9 +1,9 @@
 {
   "name": "dsh-docx-from-images",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
-  "description": "Screenshot -> Word typesetting for DeepSeek Harness: docx_typeset / docx_crop tools plus the image-to-docx skill.",
+  "description": "Screenshot -> Word typesetting for DeepSeek Harness: docx_typeset / docx_crop / docx_ocr tools plus the image-to-docx skill.",
   "license": "MIT",
   "author": "wjx-ai",
   "repository": {
@@ -28,6 +28,8 @@
     "index.js",
     "builder.py",
     "crop.py",
+    "ocr.py",
+    "ocr_ps.ps1",
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",

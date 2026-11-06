@@ -1,9 +1,9 @@
 # dsh-docx-from-images
 
 把截图 / 扫描件里的试卷、讲义重新排成 **排版一致的 Word 文档** —— 这是 DeepSeek Harness 的一个 Host 插件（bundle），
-提供两个工具和一份技能（skill），并把 OOXML 排版里最容易踩的几个坑全部内置规避。
+提供三个工具和一份技能（skill），并把 OOXML 排版里最容易踩的几个坑全部内置规避。
 
-> Screenshot → Word typesetting plugin for DeepSeek Harness. Two tools (`docx_typeset`, `docx_crop`) and one skill (`image-to-docx`).
+> Screenshot → Word typesetting plugin for DeepSeek Harness. Three tools (`docx_typeset`, `docx_crop`, `docx_ocr`) and one skill (`image-to-docx`).
 
 ![示例](docs/example.png)
 
@@ -13,12 +13,16 @@
 | --- | --- | --- |
 | `docx_typeset` | Tool | 按 JSON spec 生成 `.docx`：着重号、制表位列（2/4 栏选项）、色带标题、**表格**、**插图**、显式分页；生成前会估算列宽并返回 warning |
 | `docx_crop` | Tool | 从截图/拍照件里裁插图：像素框裁剪、去白边、放大、网格预览；**纸底美白**（`white_point`）、**可调墨迹阈值**（`trim_threshold`）、**多联图拼合**（`compose` + `panels`） |
+| `docx_ocr` | Tool | 把图**读成文字**：每一行带 bbox 坐标（模型看不见图时唯一可靠的转写依据）；`figures:true` 还会报告"文字行之间仍有墨迹的空白带"= 插图位置 |
 | `image-to-docx` | Skill | 端到端流程：探图 → 逐图转写 → 标格式 → 写 spec → 生成 → 目视验收 → 交付话术 |
 
 ## 安装
 
 需要本机有 Python 3 + `python-docx` + `Pillow`。插件会依次尝试：
 `$DSH_PYTHON` → `$DSH_HOME/dsh-runtimes/*/dependencies/python` → `$HOME/.dsh/...` → PATH 上的 `python`。
+
+`docx_ocr` 走的是 Windows 自带的 OCR 引擎（`Windows.Media.Ocr`），**仅 Windows**，并且需要装了
+`zh-Hans-CN` 语言包；其他平台上该工具会直接报错，`docx_typeset` / `docx_crop` 不受影响。
 
 ```powershell
 # 把仓库放到任意目录，然后在 Harness 里用 plugin_manager 安装这个目录
@@ -27,7 +31,7 @@ plugin_manager({ action: "install_bundle", target: "<本仓库绝对路径>" })
 
 装好后：
 
-- 工具出现在 Agent 的工具列表里（`docx_typeset` / `docx_crop`）；
+- 工具出现在 Agent 的工具列表里（`docx_typeset` / `docx_crop` / `docx_ocr`）；
 - 技能目录里多出 `image-to-docx`，用户说“把这几张截图排成 Word”时会自动加载；
 - 插件面板里的标题与图标来自 `locale/zh.json`、`locale/en.json` 与 `icon.svg`。
 
@@ -113,6 +117,35 @@ docx_typeset({
 
 输出的 JSON 里带 `ink_box`（成品墨迹范围），四个角落应当是 255，可以用来判断美白是否真的生效。
 
+## 读图：文字 + 坐标 + 插图位置（`docx_ocr`）
+
+模型看不见图的时候，转写只能靠 OCR —— 而且必须是**带坐标**的 OCR，否则对不齐行、也分不清哪句话在图上方哪句话在图下方。`docx_ocr` 调 Windows 自带引擎（`Windows.Media.Ocr`）给出每行的 bbox：
+
+```
+docx_ocr({ src: "page1.jpg", scale: 2, white_point: true, figures: true })
+```
+
+返回（坐标一律落回**原图像素空间**，与 `scale` 无关）：
+
+```json
+{
+  "lines": 49, "width": 1536, "height": 2162,
+  "boxes": [ { "y0": 72, "y1": 118, "x0": 204, "x1": 1242, "text": "三年级上册数学真题测试卷苏教版" } ],
+  "text": "三年级上册数学真题测试卷苏教版\n（期中测试卷）\n…",
+  "figures": [ { "y0": 1064, "y1": 1204, "x0": 113, "x1": 1279, "w": 1166, "h": 140 } ]
+}
+```
+
+几个关键点：
+
+- **`figures` 是替代"用眼睛找图"的办法**：插图一定落在文字行之间的空白带里，所以"两行之间还有墨迹"的就是图。空白带本身没有墨迹的不算（用 `ink_bbox` 复核），页面上贯通上下的竖线（表格线、密封线）用 `drop_rules` 先剔掉，否则图框左边界会粘到那条线上。
+- **中文归一化**：引擎会把每个汉字用空格隔开（`三 年 级…`），这里按"汉字—汉字 / 汉字—全角标点"的边界合并回去，而 `66 ÷ 3 + 3` 的间距保留。
+- `region:[x0,y0,x1,y1]` 限定只读某块；卷面左侧有密封线时用它把那一栏排掉，比事后裁更省事。
+- `scale:2` 对小字明显提准；`white_point` 对拍照件必开（见上一节）。
+- 输出按 `y0`、`x0` 排序，读数顺序稳定（引擎原始顺序会在表格处乱跳）。
+
+拿到 `figures` 的框就能直接喂给 `docx_crop`：`box` 参数与这里的 `[x0,y0,x1,y1]` 同构，先 `trim` 收一下再放大即可。
+
 ## 验证（可选，需要装有 Word）
 
 ```powershell
@@ -127,9 +160,11 @@ $d.ExportAsFixedFormat($pdf, 17); $d.Close(0); $w.Quit()
 ## 目录结构
 
 ```
-index.js        插件入口：注册 docx_typeset / docx_crop / image-to-docx
+index.js        插件入口：注册 docx_typeset / docx_crop / docx_ocr / image-to-docx
 builder.py      JSON spec -> .docx（python-docx）
 crop.py         截取插图 / 纸底美白 / 多联图拼合 / 网格预览 / 尺寸探测（Pillow）
+ocr.py          图像 -> 文字行 + bbox + 插图候选带（Pillow 预处理）
+ocr_ps.ps1      Windows.Media.Ocr 的实际调用（纯 ASCII，PowerShell 5.1 兼容）
 cordis.patch.yml  bundle 安装行
 locale/{zh,en}.json  插件面板的标题与描述
 icon.svg        插件图标
